@@ -370,9 +370,9 @@ impl<T> IterableArena<T> {
     /// ## Example
     ///
     /// ```
-    /// use typed_arena::Arena;
+    /// use typed_arena::IterableArena;
     ///
-    /// let arena = Arena::new();
+    /// let arena = IterableArena::new();
     ///
     /// arena.alloc("a");
     /// arena.alloc("b");

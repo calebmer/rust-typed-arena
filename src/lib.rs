@@ -237,6 +237,10 @@ impl<T> Arena<T> {
             // by never pushing to inner `Vec`s beyond their initial capacity.
             // The returned reference is unique (`&mut`):
             // the `Arena` never gives away references to existing items.
+            //
+            // However, `IterableArena` will give away references to existing
+            // items. Which is why its allocation functions do not return a
+            // unique mutable reference.
             unsafe { mem::transmute::<&mut [T], &mut [T]>(new_slice_ref) }
         };
 
@@ -341,5 +345,151 @@ impl<T> ChunkList<T> {
         let new_capacity = cmp::max(double_cap, required_cap);
         let chunk = mem::replace(&mut self.current, Vec::with_capacity(new_capacity));
         self.rest.push(chunk);
+    }
+}
+
+/// An iterable arena of objects of type `T`.
+///
+/// You are allowed to iterate through `IterableArena` but not `Arena` because
+/// `IterableArena` does not give you a unique mutable reference after you
+/// allocate data unlike `Arena`.
+///
+/// See `Arena` for documentation.
+pub struct IterableArena<T> {
+    arena: Arena<T>,
+}
+
+impl<T> IterableArena<T> {
+    /// Iterate through the items allocated in this arena.
+    ///
+    /// Items in the iterator appear in the order that they were allocated in.
+    ///
+    /// Allocations that happen after iteration begins but before the iterator
+    /// has returned `None` will be included in the iteration.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use typed_arena::Arena;
+    ///
+    /// let arena = Arena::new();
+    ///
+    /// arena.alloc("a");
+    /// arena.alloc("b");
+    /// arena.alloc("c");
+    ///
+    /// let mut iter = arena.iter();
+    ///
+    /// assert_eq!(iter.next(), Some(&"a"));
+    /// assert_eq!(iter.next(), Some(&"b"));
+    /// assert_eq!(iter.next(), Some(&"c"));
+    ///
+    /// arena.alloc("d");
+    ///
+    /// assert_eq!(iter.next(), Some(&"d"));
+    /// assert_eq!(iter.next(), None);
+    ///
+    /// arena.alloc("e");
+    ///
+    /// assert_eq!(iter.next(), None);
+    /// ```
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        Iter {
+            done: false,
+            chunk: 0,
+            i: 0,
+            arena: &self.arena,
+        }
+    }
+
+    /// See `Arena::new` for documentation.
+    pub fn new() -> IterableArena<T> {
+        let arena = Arena::new();
+        IterableArena { arena }
+    }
+
+    /// See `Arena::with_capacity` for documentation.
+    pub fn with_capacity(n: usize) -> IterableArena<T> {
+        let arena = Arena::with_capacity(n);
+        IterableArena { arena }
+    }
+
+    /// See `Arena::alloc` for documentation.
+    ///
+    /// We do not return a unique mutable reference since we want to be able to
+    /// iterate over the allocated data immediately after its allocation. So we
+    /// can’t have a unique reference.
+    #[inline]
+    pub fn alloc(&self, value: T) -> &T {
+        self.arena.alloc(value)
+    }
+
+    /// See `Arena::alloc_extend` for documentation.
+    ///
+    /// We do not return a unique mutable reference since we want to be able to
+    /// iterate over the allocated data immediately after its allocation. So we
+    /// can’t have a unique reference.
+    #[inline]
+    pub fn alloc_extend<I>(&self, iterable: I) -> &[T]
+    where
+        I: IntoIterator<Item = T>,
+    {
+        self.arena.alloc_extend(iterable)
+    }
+
+    /// See `Arena::into_vec` for documentation.
+    #[inline]
+    pub fn into_vec(self) -> Vec<T> {
+        self.arena.into_vec()
+    }
+}
+
+struct Iter<'a, T: 'a> {
+    done: bool,
+    chunk: usize,
+    i: usize,
+    arena: &'a Arena<T>,
+}
+
+impl<'a, T: 'a> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+
+    // Depends on a couple assumptions:
+    // 1) `!Sync`, in other words every operation on the arena
+    //    happens atomically.
+    // 2) Chunks in `rest` are frozen. They will never be pushed to again.
+    // 3) The only current chunk mutation is `Vec::push()`.
+    // 4) There are no unique references (`mut`) to the items in the arena. This
+    //    is only true for `IterableArena`.
+    //
+    // If while we are iterating the current chunk the arena allocates new
+    // chunks then the next iteration will continue in the same chunk. Since
+    // `self.chunk != chunks.rest.len()`. `self.chunk` now points to the new
+    // location of what was previously the current chunk.
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let chunks = self.arena.chunks.borrow();
+        if self.chunk == chunks.rest.len() {
+            let chunk = &chunks.current;
+            if self.i == chunk.len() {
+                self.done = true;
+                return None;
+            }
+            let i = self.i;
+            self.i += 1;
+            Some(unsafe { mem::transmute(&chunk[i]) })
+        } else {
+            let chunk = &chunks.rest[self.chunk];
+            if self.i == chunk.len() {
+                self.chunk += 1;
+                self.i = 0;
+            }
+            let i = self.i;
+            self.i += 1;
+            Some(unsafe { mem::transmute(&chunk[i]) })
+        }
     }
 }
